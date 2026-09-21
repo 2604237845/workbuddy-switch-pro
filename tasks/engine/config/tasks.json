@@ -1,0 +1,91 @@
+{
+  "_说明": "wb-task-hub 配置。engine.py 读取本文件；改完不用重启任何东西，下次运行即生效。",
+  "version": 1,
+
+  "_账号来源": "直接复用 workbuddy-switch 的账号库（只读，不修改它）。",
+  "accounts_source": "~/.wb-switch/accounts.json",
+  "_账号过滤": "按域名排除国际版（workbuddy.ai / codebuddy.ai）。国内版 workbuddy.cn 与 codebuddy.cn 都保留 —— 实测 variant 字段对 codebuddy.cn 账号为空，用它过滤会误伤。",
+  "exclude_domains": ["workbuddy.ai", "codebuddy.ai"],
+  "only_variant": "",
+
+  "_排除清单": "把上游脚本里这些任务函数替换成空操作 —— 即 workbuddy-switch 已经做掉、我们不要重复的部分。",
+  "exclude_functions": {
+    "t_sign": "每日签到 —— workbuddy-switch 已自动做",
+    "t_travel": "猫猫旅行（派 Buddy）—— workbuddy-switch 已自动做"
+  },
+
+  "_桌面任务策略": "desktop_mode 三选一：off=完全跳过；fingerprint=用纯 API 事件上报建立桌面会话（默认，绝不碰进程）；full=上游原始 Windows 换血流程（会 taskkill /F /IM WorkBuddy.exe 并改写桌面端认证文件，禁止使用）。注意 fingerprint 不只是「不杀进程」——它是上游自己的合法路径（注释：task_runner 同款，无需真实桌面端），且新账号必须先有桌面会话，否则后续任务接受会被回滚、遥测不计数。",
+  "desktop_mode": "fingerprint",
+  "_桌面任务适用账号": "desktop_scope 二选一：all=每个账号都做（用指纹上报替它建立桌面会话，覆盖最大，默认）；current=只做「此刻真实桌面端登录的那个账号」，其余账号跳过桌面类任务。⚠️ 实测耦合：桌面会话不只是那 2 个桌面任务的前提，它是整个成长中心任务「接受」能否生效的前提 —— 服务端会静默回滚没有桌面会话的账号的任务接受（表现：日志停在「还有 18 个任务待同步」，账号只完成 1/19）。所以 current 会让非当前账号当次只拿到开学季/抽奖/少数奖励。判定来源是桌面端认证文件里的 account.uid，只读，不写。可用 --desktop-current / --desktop-all 临时覆盖。",
+  "desktop_scope": "all",
+  "school_activity": true,
+  "claim_rewards": true,
+
+  "_节奏": "写动作间隔秒数，最低 1.0。太激进容易触发频控。",
+  "write_gap": 2.0,
+
+  "_安全": "dry_run=true 时拦截所有非 GET 请求（在 requests.Session.request 层统一拦截），只读不写，用于验证链路。",
+  "dry_run_default": true,
+
+  "_账号切换守望者": "watch.py 只做一件事：盯着桌面端认证文件的 account.uid，一变（=wb-switch 切换了账号）就等它稳定，然后对那个账号单独补跑一次。全程**只读**认证文件、**绝不替你切换账号**。已有 engine 在跑时这一轮让路，避免和全量运行抢同一个账号。",
+  "watch": {
+    "enabled": true,
+    "poll_seconds": 5,
+    "_debounce": "检测到 uid 变化后，连续这么久不再变才动手 —— 切换过程会反复写这个文件。",
+    "debounce_seconds": 30,
+    "_min_gap": "同一个账号两次补跑的最小间隔（分钟），防止来回抖动被反复触发。设 0 = 不限制。",
+    "min_gap_minutes": 120,
+    "_run_on_start": "守望者启动时若当前桌面账号尚未跑过，是否立刻补跑一次。false = 只记录，等下一次真正的切换。",
+    "run_on_start": false
+  },
+
+  "_领奖后复查": "上游的顺序是「先开盲盒/抽奖，最后才领奖（每个+5能量）」—— 本次刚领到的能量只能等下次运行才用得上。开启本项后，领奖跑完会再查一次抽奖次数和盲盒额度，把新到账的立刻用掉。两者都是「先查余额、够了才动」，重复调用幂等。",
+  "post_claim_recheck": true,
+
+  "_兜底领奖": "🔴 2026-09-20 用户报障「任务做完了但没领取奖励」的根治项。根因有二：① 我们几个补丁（资料库/发现应用/企鹅教师助手/尝鲜技能）只负责「点亮」任务，从不调 claim；② 服务端对埋点是**延迟入账**的，上游那个领奖循环跑到时任务还是 accepted，等翻成 completed 时已经没人领了。修法：补丁点亮后当场 claim + 单账号流程末尾全量扫一遍 + 全部账号跑完再统一扫一遍。claim 幂等，已领过返回 already_claimed，重复调用无副作用。",
+  "final_claim_sweep": true,
+
+  "_技能真实对话": "「尝鲜热门技能」(skill_1) 只打 /v2/report 埋点服务端永远不给进度（卡 accepted 0/1）。实测发现：把 skill_info 埋点塞进**真实 POST /console/chat/completions 的 _meta['codebuddy.ai']['growthEvent']**，立刻变 completed 1/1（客户端就是 parseGrowthEvents(meta.growthEvent)；上游能点亮的任务走的也是这条路）。开启后在桌面任务阶段补一次真实对话。",
+  "skill_real_chat": true,
+
+  "_资料库上报形状": "上游 report_web_event() 发的是 {common,events} 信封，但资料库前端（static.workbuddy.cn/web/library/<hash>/js/main~4.js）实际发的是**裸数组**，带 X-User-Id / X-Request-Trace-Id / X-Requested-With 三个头。实测（账号5）只把形状改对，Library_read 就从 accepted 0/1 变 completed 1/1 —— 不是伪造不出来，是报文形状写错了。开启后替换 t_library。",
+  "fix_library_report": true,
+
+  "_桌面事件上报形状": "🔑 真凶：上游 report() 发裸数组（能用），report_desktop_events() 却发 {common,events} 信封、且事件缺 timestamp/reportDelay → 服务端一律 HTTP 200 但不计分。实测改成裸数组+补时间字段后，Buddy_App / Buddy_App_QQ 双双从 accepted 0/1 变 completed 1/1；只改形状不补字段会 HTTP 400。本项同时覆盖 RichMeow_Chat 与发现应用。",
+  "fix_report_shape": true,
+
+  "_小程序上报形状": "🔑 同一个真凶的**漏网两处**：上游 _mini_report()（小程序对话任务 Sequential_Tasks_1）与 t_school_season() 内联的 mp 上报，都发 {common,events} 信封 → HTTP 200 但不计分，日志长期是「mini chat 已上报」却卡 accepted 0/1。2026-09-20 实测（账号2）：改成裸数组后 Sequential_Tasks_1 **3 秒内** completed 1/1 并领到 +100积分+5能量。⚠️ 这两个任务不需要抓包 —— 事件码/字段/域名/请求头上游本来就抄对了，错的只是信封形状。",
+  "fix_mini_report": true,
+
+  "_自动更新": "静默同步上游任务逻辑，仅在安全检查不过时告警。",
+  "auto_update": {
+    "enabled": true,
+    "repo": "L0NE-6/WorkBuddy-Daily",
+    "branch": "main",
+    "files": ["workbuddy_daily.py", "workbuddy_login.py"],
+    "check_interval_hours": 12,
+    "guards": {
+      "min_bytes": 60000,
+      "max_bytes": 400000,
+      "max_size_delta_ratio": 0.5,
+      "allowed_hosts": [
+        "workbuddy.cn",
+        "codebuddy.cn",
+        "copilot.tencent.com",
+        "tencent.com",
+        "myqcloud.com",
+        "qcloud.com",
+        "weixin.qq.com",
+        "woa.com"
+      ],
+      "require_functions": [
+        "run_account",
+        "t_sign",
+        "t_travel",
+        "new_api",
+        "report",
+        "claim"
+      ]
+    }
+  }
+}

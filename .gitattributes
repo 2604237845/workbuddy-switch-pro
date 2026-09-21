@@ -1,0 +1,20 @@
+# Trellis: append-only developer journals should merge cleanly across
+# parallel sessions/worktrees — each session only appends a new block, so
+# there is nothing to actually conflict on.
+#
+# Do NOT add a rule for workspace/*/index.md here — it is fully regenerated
+# every session, so a real conflict there is expected and safe to resolve by
+# picking either side (task state lives in task.json, not index.md). See
+# .trellis/spec/cli/backend/directory-structure.md for details.
+.trellis/workspace/*/journal-*.md merge=union
+
+# Windows 批处理必须保持 CRLF：cmd.exe 对 LF-only 的 .bat 会粘行、执行错乱。
+# `-text` = 关闭行尾转换，**仓库里存的字节就是原样** →
+# 无论 git clone 还是从 GitHub 直接下 ZIP，拿到的都是可用的 CRLF 文件。
+*.bat -text
+*.cmd -text
+
+# vendor/ 下的上游文件带 sha256 固定值（tasks/engine/config/upstream.json），
+# 必须**逐字节**一致：一旦 clone 到 Windows 被转成 CRLF，sha 就对不上，
+# 同步护栏会误报「上游文件被改动」。所以这一整个目录关掉行尾转换。
+tasks/engine/vendor/* -text

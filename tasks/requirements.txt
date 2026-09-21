@@ -1,0 +1,15 @@
+# WorkBuddy 任务中心 —— Python 依赖
+#
+# 安装（推荐用虚拟环境，别装进系统 Python）：
+#     python -m venv .venv
+#     .venv\Scripts\pip install -r tasks\requirements.txt
+#
+# 为什么要分开写：engine 只需要 requests；service 还需要 web 框架。
+# 只跑命令行任务的话，理论上可以只装 requests，但一起装最省事。
+
+requests>=2.31          # 全部网络请求（engine + vendor 上游脚本都用它）
+urllib3>=2.0            # 关掉证书告警（上游脚本对部分自签域名会告警）
+
+# 下面两个只有 tasks/service（常驻服务 + 网页面板）才需要
+fastapi>=0.110
+uvicorn>=0.27

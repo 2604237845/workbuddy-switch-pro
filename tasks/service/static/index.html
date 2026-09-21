@@ -1,0 +1,740 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>WorkBuddy 任务中心 · 本地托管面板</title>
+<style>
+  /* 浅色底 + 蓝色主色 + 白卡片 + 12px 圆角 */
+  :root{
+    --bg:#f4f6fa; --card:#ffffff; --line:#e4e8f0; --line2:#eef1f6;
+    --tx:#1f2329; --tx2:#5a626e; --muted:#98a0ac;
+    --accent:#2f6fed; --accent-soft:#eaf1fe; --accent2:#2560d8;
+    --ok:#16a34a; --ok-soft:#e8f7ee;
+    --warn:#d97706; --warn-soft:#fdf3e3;
+    --err:#dc2626; --err-soft:#fdecec;
+    --purple:#7c3aed;
+    --r:12px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--tx);
+    font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased}
+  a{color:var(--accent);text-decoration:none}
+  .wrap{max-width:1280px;margin:0 auto;padding:20px 18px 60px}
+
+  header{display:flex;align-items:center;gap:13px;flex-wrap:wrap;margin-bottom:16px}
+  header h1{font-size:20px;margin:0;font-weight:650;letter-spacing:.3px}
+  header .sub{color:var(--muted);font-size:12.5px}
+  .spacer{flex:1}
+
+  .btn{background:#fff;color:var(--tx);border:1px solid var(--line);
+    border-radius:9px;padding:7px 14px;font:inherit;font-size:13px;cursor:pointer;
+    transition:.14s;white-space:nowrap}
+  .btn:hover{border-color:#c3cddd;background:#fafbfe}
+  .btn[disabled]{opacity:.5;cursor:not-allowed}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  .btn.primary:hover{background:var(--accent2)}
+  .btn.danger{background:#fff;border-color:#f0c4c4;color:var(--err)}
+  .btn.danger:hover{background:var(--err-soft)}
+  .btn.sm{padding:4px 10px;font-size:12.5px;border-radius:7px}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px}
+  .card h2{font-size:14.5px;margin:0 0 12px;font-weight:640;display:flex;
+    align-items:center;gap:8px;flex-wrap:wrap}
+  .card h2 .tag{font-size:11.5px;font-weight:400;color:var(--muted);
+    background:#f1f3f7;padding:2px 8px;border-radius:999px}
+
+  .stat{display:flex;gap:11px;flex-wrap:wrap}
+  .stat .box{flex:1;min-width:96px;background:#fbfcfe;border:1px solid var(--line2);
+    border-radius:10px;padding:10px 12px}
+  .stat .box .k{font-size:12px;color:var(--muted)}
+  .stat .box .v{font-size:19px;font-weight:640;margin-top:2px;font-variant-numeric:tabular-nums}
+  .v.ok{color:var(--ok)} .v.warn{color:var(--warn)} .v.err{color:var(--err)}
+  .v.muted{color:var(--muted)}
+
+  .dot{width:7px;height:7px;border-radius:50%;display:inline-block;flex:none;background:var(--muted)}
+  .dot.run{background:var(--ok);animation:pulse 1.6s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(22,163,74,.5)}
+    70%{box-shadow:0 0 0 8px rgba(22,163,74,0)}100%{box-shadow:0 0 0 0 rgba(22,163,74,0)}}
+
+  table{width:100%;border-collapse:collapse;font-size:12.8px}
+  th{text-align:left;color:var(--muted);font-weight:520;font-size:12px;
+    padding:7px 9px;border-bottom:1px solid var(--line2);white-space:nowrap}
+  td{padding:7px 9px;border-bottom:1px solid var(--line2);vertical-align:middle}
+  tr:hover td{background:#fafbfe}
+  tr.cur td{background:var(--accent-soft)}
+
+  .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11.5px;
+    border:1px solid var(--line);background:#fff;white-space:nowrap}
+  .pill.claimed{background:var(--ok-soft);color:#12703c;border-color:#c6ecd4}
+  .pill.completed{background:var(--warn-soft);color:#8a5605;border-color:#f3ddb4}
+  .pill.accepted{background:var(--accent-soft);color:#1d4ba8;border-color:#cddffb}
+  .pill.in_progress{background:#f3eefe;color:#5b21b6;border-color:#ddd0fb}
+  .pill.not_accepted{background:#f1f3f7;color:var(--muted);border-color:var(--line)}
+
+  .bar{height:5px;background:#e8ecf4;border-radius:99px;overflow:hidden;margin-top:4px}
+  .bar>i{display:block;height:100%;border-radius:99px;
+    background:linear-gradient(90deg,#7db1f8,var(--accent))}
+
+  #log{background:#fbfcfe;border:1px solid var(--line2);border-radius:10px;
+    padding:10px 12px;height:400px;overflow-y:auto;font:12.3px/1.65
+    ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-all}
+  #log .l{display:block}
+  #log .l.err{color:var(--err)}
+  #log .l.ok{color:#12703c}
+  #log .l.run{color:var(--accent);font-weight:600}
+  #log .l.sys{color:var(--purple)}
+  #log .l.warn{color:var(--warn)}
+  #log .l.engine{color:var(--tx2)}
+  #log .t{color:var(--muted);margin-right:6px}
+
+  .field{display:flex;align-items:center;gap:9px;margin-bottom:9px;font-size:13px;flex-wrap:wrap}
+  .field>label{color:var(--tx2);min-width:74px}
+  input[type=text],input[type=number],input[type=time],select{
+    background:#fff;border:1px solid var(--line);color:var(--tx);
+    border-radius:8px;padding:6px 9px;font:inherit;font-size:13px}
+  input[type=time]{width:106px}
+  input:focus,select:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+  input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent);cursor:pointer}
+  input[type=number]{width:84px}
+  label.sw{display:inline-flex;align-items:center;gap:7px;padding:6px 11px;
+    border:1px solid var(--line);border-radius:999px;cursor:pointer;background:#fff;
+    font-size:12.5px;user-select:none}
+  label.sw input{margin:0}
+
+  .note{font-size:12.5px;color:var(--tx2);margin-top:8px;line-height:1.65}
+  .warnbox{background:var(--warn-soft);border-left:3px solid var(--warn);
+    color:#7a4d05;border-radius:0 9px 9px 0;padding:9px 12px;font-size:12.5px;margin-top:10px}
+  .errbox{background:var(--err-soft);border-left:3px solid var(--err);
+    color:#9b1c1c;border-radius:0 9px 9px 0;padding:9px 12px;font-size:12.5px;margin-top:10px}
+  .okbox{background:var(--ok-soft);border-left:3px solid var(--ok);
+    color:#12703c;border-radius:0 9px 9px 0;padding:9px 12px;font-size:12.5px;margin-top:10px}
+  .infobox{background:var(--accent-soft);border-left:3px solid var(--accent);
+    color:#1d4ba8;border-radius:0 9px 9px 0;padding:9px 12px;font-size:12.5px;margin-top:10px}
+
+  .job{display:flex;align-items:center;gap:10px;background:#fbfcfe;
+    border:1px solid var(--line2);border-radius:10px;padding:9px 11px;margin-bottom:8px;
+    font-size:13px;flex-wrap:wrap}
+  .job .nm{font-weight:600;min-width:120px}
+  .job .at{font-family:ui-monospace,Consolas,monospace;color:var(--accent);font-weight:600}
+  .job .ds{color:var(--muted);font-size:12px;flex:1;min-width:170px}
+
+  .toast{position:fixed;right:20px;bottom:20px;background:#fff;
+    border:1px solid var(--line);border-radius:10px;padding:11px 15px;font-size:13px;
+    max-width:380px;box-shadow:0 10px 34px rgba(20,30,60,.18);z-index:99;
+    opacity:0;transform:translateY(12px);transition:.22s;pointer-events:none}
+  .toast.show{opacity:1;transform:none}
+  .toast.err{border-color:var(--err);color:var(--err)}
+  .toast.ok{border-color:var(--ok);color:#12703c}
+
+  .modal{position:fixed;inset:0;background:rgba(20,30,50,.42);display:none;
+    align-items:center;justify-content:center;z-index:100;padding:20px}
+  .modal.show{display:flex}
+  .modal .box{background:#fff;border-radius:12px;padding:20px;max-width:450px;width:100%;
+    box-shadow:0 20px 60px rgba(20,30,60,.25)}
+  .modal h3{margin:0 0 10px;font-size:15.5px}
+  .modal .acts{display:flex;gap:9px;justify-content:flex-end;margin-top:16px}
+
+  .scroll{max-height:360px;overflow:auto}
+  .muted{color:var(--muted)}
+  .flex{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+  code{background:#eef1f7;padding:1.5px 6px;border-radius:5px;
+    font:12px ui-monospace,Menlo,Consolas,monospace}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <span class="dot idle" id="liveDot"></span>
+    <h1>任务中心</h1>
+    <span class="sub">WorkBuddy 任务托管 · <span id="svcState">连接中…</span></span>
+    <span class="spacer"></span>
+    <button class="btn" id="btnRefresh">刷新</button>
+    <button class="btn primary" id="btnRun">▶ 立即跑一轮</button>
+  </header>
+
+  <div class="grid">
+
+    <!-- 运行状态 -->
+    <div class="card">
+      <h2>运行状态 <span class="tag" id="runTag">空闲</span></h2>
+      <div class="stat">
+        <div class="box"><div class="k">总运行</div><div class="v" id="sTotal">–</div></div>
+        <div class="box"><div class="k">定时触发</div><div class="v" id="sAuto">–</div></div>
+        <div class="box"><div class="k">手动触发</div><div class="v" id="sManual">–</div></div>
+        <div class="box"><div class="k">完成/总数</div><div class="v" id="sDone">–</div></div>
+      </div>
+      <div id="runInfo" class="note"></div>
+      <div id="runErr"></div>
+      <div class="field" style="margin-top:12px">
+        <label>执行模式</label>
+        <label class="flex" style="min-width:auto">
+          <input type="checkbox" id="liveSwitch" />
+          <span id="liveLabel" class="muted">只读演练</span>
+        </label>
+      </div>
+      <div class="note">
+        <b>只读演练</b>会拦截所有写请求，只验证链路不产生任何变化。<br>
+        要真正完成任务，需切到<b>真实执行</b>（定时任务用的是配置里的模式）。
+      </div>
+    </div>
+
+    <!-- 定时计划 -->
+    <div class="card">
+      <h2>定时计划 <span class="tag">本服务自管 · 不依赖 WorkBuddy</span></h2>
+      <div class="field">
+        <label>总开关</label>
+        <label class="flex" style="min-width:auto">
+          <input type="checkbox" id="schedEnabled" />
+          <span id="schedEnabledLabel" class="muted">已启用</span>
+        </label>
+      </div>
+      <div class="field">
+        <label>定时模式</label>
+        <label class="flex" style="min-width:auto">
+          <input type="checkbox" id="schedLive" />
+          <span id="schedLiveLabel" class="muted">只读演练</span>
+        </label>
+      </div>
+      <div id="jobs" style="margin-top:12px"></div>
+      <div class="note" id="nextRuns"></div>
+    </div>
+
+    <!-- 守望者：切换账号自动补跑 -->
+    <div class="card">
+      <h2>切换账号守望者 <span class="tag" id="watchTag">检测中…</span></h2>
+
+      <div class="flex" style="margin-bottom:10px">
+        <label class="sw">
+          <input type="checkbox" id="watchEnabled" />
+          <span id="watchEnabledLabel">启用</span>
+        </label>
+        <button class="btn sm" id="btnWatchCheck">立即检查一次</button>
+      </div>
+
+      <div class="stat" style="margin-bottom:10px">
+        <div class="box">
+          <div class="k">桌面端当前账号</div>
+          <div class="v" id="watchUid" style="font-size:14px">–</div>
+        </div>
+        <div class="box">
+          <div class="k">本次动作</div>
+          <div class="v" id="watchAction" style="font-size:14px">–</div>
+        </div>
+      </div>
+
+      <div id="watchMsg" class="note"></div>
+
+      <div class="field" style="margin-top:12px">
+        <label>轮询间隔</label>
+        <input type="number" id="watchPoll" min="2" max="120" step="1" />
+        <span class="muted" style="font-size:12.5px">秒</span>
+        <label style="min-width:auto">稳定等待</label>
+        <input type="number" id="watchDebounce" min="0" max="600" step="1" />
+        <span class="muted" style="font-size:12.5px">秒</span>
+      </div>
+      <div class="field">
+        <label>同账号冷却</label>
+        <input type="number" id="watchGap" min="0" max="1440" step="1" />
+        <span class="muted" style="font-size:12.5px">分钟（0 = 不限制）</span>
+        <button class="btn sm" id="btnWatchSave">保存参数</button>
+      </div>
+
+      <div class="infobox">
+        <b>它只观察，不切换账号。</b>你（或 wb-switch）切了账号之后，它发现桌面端
+        <code>account.uid</code> 变了 → 等稳定 → 对<b>刚切过去的那个账号</b>单独补跑一轮。
+        刚切过去的账号有真实桌面会话，那一刻跑它成功率最高。
+      </div>
+      <div class="note">
+        认不出是哪个账号时<b>什么都不做</b>（不猜账号去顶）；同账号有冷却，防来回抖动反复触发；
+        已有任务在跑时这一轮让路。整个守望由本服务负责，<b>不需要单独开窗口</b>。
+      </div>
+    </div>
+
+    <!-- 账号 -->
+    <div class="card" style="grid-column:1/-1">
+      <h2>账号与任务 <span class="tag" id="accTag"></span></h2>
+      <div class="flex" style="margin-bottom:10px">
+        <button class="btn sm" id="btnAccRefresh">刷新账号</button>
+        <button class="btn sm" id="btnDetailAll">展开全部明细</button>
+        <span class="note" style="margin:0">
+          在「实时日志」里点账号行可单独跑该账号。切换账号按钮会调用 wb-switch 自己的接口。
+        </span>
+      </div>
+      <div class="scroll"><table>
+        <thead><tr>
+          <th>#</th><th>账号</th><th>完成</th><th>进度</th>
+          <th>已领</th><th>待领</th><th>进行中</th><th>未接受</th>
+          <th>等级</th><th>能量</th><th title="登录凭证剩余有效期">凭证有效期</th><th>操作</th>
+        </tr></thead>
+        <tbody id="accBody">
+          <tr><td colspan="12" class="muted">加载中…</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+
+    <!-- 日志 -->
+    <div class="card" style="grid-column:1/-1">
+      <h2>实时日志 <span class="tag" id="logTag">0 行</span></h2>
+      <div class="flex" style="margin-bottom:9px">
+        <button class="btn sm" id="btnLogPause">暂停滚动</button>
+        <button class="btn sm" id="btnLogClear">清空显示</button>
+        <label class="flex" style="min-width:auto;font-size:12px;color:var(--muted)">
+          <input type="checkbox" id="autoScroll" checked /> 自动滚到底
+        </label>
+      </div>
+      <div id="log"></div>
+      <div class="note">
+        日志实时推送。<b>这块就是任务执行时的真实输出</b>，与命令行一致。
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<div class="modal" id="confirmModal">
+  <div class="box">
+    <h3>确认真实执行</h3>
+    <div class="note" style="margin:0 0 12px">
+      这会<b>真正提交任务</b>（做任务、领奖励、开盲盒）。确认现在跑吗？
+    </div>
+    <div class="field"><label>范围</label>
+      <select id="confirmOnly">
+        <option value="">全部账号</option>
+      </select>
+    </div>
+    <div class="acts">
+      <button class="btn" id="cfmCancel">取消</button>
+      <button class="btn primary" id="cfmOk">确认执行</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+let live = false;           // 前端认为的「真实执行」开关（仅用于手动触发）
+let logPaused = false;
+let lastSeq = 0;
+let accounts = [];
+let expanded = {};
+let watchUid = "";      // 桌面端此刻登录的账号 uid（守望者盯的那个）
+
+/* ---------------- 工具 ---------------- */
+function toast(msg, kind) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = "toast show" + (kind ? " " + kind : "");
+  clearTimeout(t._tm);
+  t._tm = setTimeout(() => { t.className = "toast" + (kind ? " " + kind : ""); }, 3600);
+}
+
+async function api(path, opts) {
+  const r = await fetch(path, Object.assign({headers: {"Content-Type": "application/json"}}, opts || {}));
+  let j = null;
+  try { j = await r.json(); } catch (e) { j = null; }
+  if (!r.ok) {
+    const msg = (j && (j.error || j.message)) || ("HTTP " + r.status);
+    throw new Error(msg);
+  }
+  return j || {};
+}
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, c =>
+    ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function fmtSecs(n) {
+  if (n == null) return "–";
+  if (n < 60) return Math.max(0, Math.round(n)) + " 秒后";
+  if (n < 3600) return Math.round(n / 60) + " 分钟后";
+  const h = Math.floor(n / 3600), m = Math.round((n % 3600) / 60);
+  return h + " 小时" + (m ? m + " 分" : "") + "后";
+}
+
+// 任务状态 → 中文。只覆盖已知枚举；未命中时**不显示英文原文**（见 statusCn）。
+const STATUS_CN = {
+  claimed: "已领取", completed: "待领取", accepted: "已接受",
+  in_progress: "进行中", not_accepted: "未接受",
+  // 下面几个目前不会出现在「任务明细」里，但引擎认这些值 —— 一并译好，
+  // 免得哪天服务端/MCP 多返回一种状态就在页面上露出英文单词。
+  already_claimed: "已领过", skipped: "已跳过",
+  pending: "待处理", failed: "失败", blocked: "已拦截",
+};
+
+// 状态中文化兜底：查不到映射时给「未知状态」而不是把英文原样贴到页面上
+// （用户 2026-09-20 明确要求页面不要出现看不懂的英文）。
+function statusCn(s) {
+  if (STATUS_CN[s]) return STATUS_CN[s];
+  return s ? "未知状态" : "未知";
+}
+
+// 未知状态也要有个能上色的 class，否则 pill 会掉样式
+function statusCls(s) {
+  return STATUS_CN[s] ? s : "not_accepted";
+}
+
+/* ---------------- 守望者 ---------------- */
+const WATCH_ACTION_CN = {
+  "idle": ["空闲", "muted"],
+  "observe": ["首次观测", "muted"],
+  "run": ["已补跑", "ok"],
+  "cooldown": ["冷却中", "warn"],
+  "no-uid": ["读不到 uid", "warn"],
+  "unknown-account": ["认不出账号", "warn"],
+  "engine-busy": ["让路给运行中任务", "warn"],
+};
+
+async function loadWatch() {
+  try {
+    const d = (await api("/api/watch")).data || {};
+    const alive = !!d.alive;
+    const on = !!d.enabled;
+
+    $("watchEnabled").checked = on;
+    $("watchEnabledLabel").textContent = on ? "启用" : "已停用";
+    $("watchTag").textContent = on ? (alive ? "运行中" : "未启动") : "已停用";
+
+    $("watchUid").textContent = d.desktopUidShort
+      ? (d.desktopUidShort + "…") : "读不到";
+    $("watchUid").className = "v" + (d.desktopUidShort ? "" : " muted");
+
+    // 记住完整 uid，账号表要用它标出「桌面端」是哪个
+    const prevUid = watchUid;
+    watchUid = d.desktopUid || "";
+    if (watchUid !== prevUid && accounts.length) {
+      renderAccounts(accounts, window.__rows || []);
+    }
+
+    const cn = WATCH_ACTION_CN[d.lastAction] || [d.lastAction || "–", "muted"];
+    $("watchAction").textContent = cn[0];
+    $("watchAction").className = "v " + cn[1];
+
+    let msg = d.lastDetail ? esc(d.lastDetail) : "";
+    if (d.uidSource) msg += (msg ? "<br>" : "") +
+      "<span class='muted'>uid 来源：" + esc(d.uidSource) + "</span>";
+    if (d.falseAlarms) msg += "<br><span class='v err'>轮询异常 " + d.falseAlarms + " 次（已忽略并继续）</span>";
+    $("watchMsg").innerHTML = msg || "守望中…";
+
+    // 参数只在没聚焦时才回填，免得用户正在输入被覆盖
+    const cfg = d.cfg || {};
+    if (document.activeElement !== $("watchPoll")) $("watchPoll").value = cfg.poll_seconds ?? 5;
+    if (document.activeElement !== $("watchDebounce")) $("watchDebounce").value = cfg.debounce_seconds ?? 30;
+    if (document.activeElement !== $("watchGap")) $("watchGap").value = cfg.min_gap_minutes ?? 120;
+  } catch (e) {
+    $("watchTag").textContent = "查询失败";
+    $("watchMsg").innerHTML = "<span class='v err'>" + esc(e.message) + "</span>";
+  }
+}
+
+async function watchToggle(on) {
+  try {
+    await api("/api/watch", {method: "POST", body: JSON.stringify({enabled: on})});
+    toast("守望者已" + (on ? "启动" : "停止"), "ok");
+    loadWatch();
+  } catch (e) { toast("操作失败：" + e.message, "err"); loadWatch(); }
+}
+
+/* ---------------- 状态 ---------------- */
+async function loadStatus() {
+  try {
+    const j = await api("/api/status");
+    const d = j.data || {};
+    const running = !!d.running;
+
+    $("liveDot").className = "dot " + (running ? "run" : "idle");
+    $("runTag").textContent = running ? "运行中" : "空闲";
+    $("svcState").textContent = running ? ("正在跑：" + (d.current || "")) : "空闲";
+
+    $("sTotal").textContent = d.totalRuns ?? 0;
+    $("sAuto").textContent = d.autoRuns ?? 0;
+    $("sManual").textContent = d.manualRuns ?? 0;
+
+    const lr = d.lastResult;
+    if (lr && lr.total) {
+      const el = $("sDone");
+      el.textContent = (lr.done ?? 0) + "/" + lr.total;
+      el.className = "v " + ((lr.done ?? 0) >= lr.total ? "ok" : "");
+    } else { $("sDone").textContent = "–"; $("sDone").className = "v"; }
+
+    let info = "";
+    if (running && d.elapsed) info = "已运行 " + Math.round(d.elapsed) + " 秒";
+    else if (lr && lr.elapsed) {
+      info = "上轮耗时 " + lr.elapsed + " 秒 · "
+        + (lr.dryRun ? "只读演练" : "真实执行")
+        + (lr.accounts ? (" · " + lr.accounts + " 个账号") : "")
+        + (lr.failures ? (" · <span class='v err'>" + lr.failures + " 个异常</span>") : "");
+    }
+    $("runInfo").innerHTML = info;
+    $("runErr").innerHTML = d.lastError
+      ? "<div class='errbox'>上次错误：" + esc(d.lastError) + "</div>" : "";
+    $("btnRun").disabled = running;
+
+    // 计划
+    const sc = d.schedule || {};
+    $("schedEnabled").checked = !!sc.enabled;
+    $("schedEnabledLabel").textContent = sc.enabled ? "已启用" : "已停用（所有定时都不会跑）";
+    $("schedLive").checked = !!sc.live;
+    $("schedLiveLabel").textContent = sc.live ? "真实执行" : "只读演练";
+    live = !!sc.live;
+    $("liveSwitch").checked = live;
+    $("liveLabel").textContent = live ? "真实执行" : "只读演练";
+    $("liveLabel").className = live ? "v warn" : "muted";
+
+    renderJobs(sc.jobs || []);
+    const nr = d.nextRuns || [];
+    $("nextRuns").innerHTML = nr.length
+      ? "下次触发：" + nr.slice(0, 3).map(x =>
+          "<b>" + esc(x.name) + "</b> " + esc(x.at) + "（" + fmtSecs(x.inSeconds) + "）").join(" · ")
+      : "没有启用的计划点。";
+  } catch (e) {
+    $("svcState").textContent = "连接失败：" + e.message;
+    $("liveDot").className = "dot idle";
+  }
+}
+
+function renderJobs(jobs) {
+  const box = $("jobs");
+  if (!jobs.length) { box.innerHTML = "<div class='note'>没有计划点</div>"; return; }
+  box.innerHTML = jobs.map(j => {
+    const off = j.enabled === false;
+    const only = j.only ? ("仅账号 " + j.only) : "全部账号";
+    return "<div class='job'>"
+      + "<input type='checkbox' data-job='" + esc(j.id) + "' " + (off ? "" : "checked") + " />"
+      + "<span class='nm' " + (off ? "style='color:var(--muted)'" : "") + ">" + esc(j.name || j.id) + "</span>"
+      + "<span class='at'>" + esc(j.at || "?") + "</span>"
+      + "<span class='ds'>" + esc(j.desc || "") + " · " + esc(only) + "</span>"
+      + "</div>";
+  }).join("");
+  box.querySelectorAll("input[data-job]").forEach(cb => {
+    cb.onchange = async () => {
+      const id = cb.getAttribute("data-job");
+      const cur = (await api("/api/schedule")).data.schedule;
+      const jobs2 = (cur.jobs || []).map(x => {
+        if (x.id !== id) return x;
+        return Object.assign({}, x, {enabled: cb.checked});
+      });
+      await api("/api/schedule", {method: "POST", body: JSON.stringify({jobs: jobs2})});
+      toast("计划已" + (cb.checked ? "启用" : "停用"), "ok");
+      loadStatus();
+    };
+  });
+}
+
+/* ---------------- 账号 ---------------- */
+async function loadAccounts() {
+  try {
+    const j = await api("/api/accounts");
+    accounts = (j.data && j.data.accounts) || [];
+    $("accTag").textContent = accounts.length + " 个账号";
+
+    const sel = $("confirmOnly");
+    sel.innerHTML = "<option value=''>全部账号</option>" +
+      accounts.map(a => "<option value='" + a.idx + "'>账号" + a.idx + " " + esc(a.note || a.nick) + "</option>").join("");
+
+    const rows = await Promise.all(accounts.map(a =>
+      api("/api/accounts/" + a.idx + "/status").then(x => x.data).catch(e => ({idx: a.idx, error: e.message}))));
+    renderAccounts(accounts, rows);
+  } catch (e) {
+    $("accBody").innerHTML = "<tr><td colspan='12' class='errbox'>加载失败：" + esc(e.message) + "</td></tr>";
+  }
+}
+
+function renderAccounts(accs, rows) {
+  const parts = [];
+  accs.forEach((a, i) => {
+    const r = rows[i] || {};
+    if (r.error) {
+      parts.push("<tr><td>" + a.idx + "</td><td>" + esc(a.note || a.nick)
+        + "</td><td colspan='10' class='muted'>查询失败：" + esc(r.error) + "</td></tr>");
+      return;
+    }
+    const done = (r.claimed|0) + (r.completed|0);
+    const total = r.total|0;
+    const pct = total ? Math.round(done / total * 100) : 0;
+    const expTxt = a.expired ? "<span class='pill completed'>已过期</span>"
+      : (a.daysLeft != null ? a.daysLeft + " 天" : "–");
+    // 待领 > 0 是异常信号（说明有奖励没领到），标红提醒
+    const pendCls = (r.completed|0) > 0 ? "v err" : "v muted";
+    // 桌面端此刻登录的是哪个账号（守望者盯的就是它）
+    const isDesk = watchUid && a.uid && a.uid === watchUid;
+
+    parts.push("<tr" + (expanded[a.idx] ? " class='cur'" : "") + ">"
+      + "<td>" + a.idx + "</td>"
+      + "<td><b>" + esc(a.note || a.nick) + "</b>"
+        + (isDesk ? " <span class='pill accepted'>桌面端</span>" : "")
+        + "<br><span class='muted' style='font-size:11px'>"
+        + esc((a.domain || "").replace("www.", "")) + "</span></td>"
+      + "<td>" + done + "/" + total + "<div class='bar'><i style='width:" + pct + "%'></i></div></td>"
+      + "<td>" + pct + "%</td>"
+      + "<td class='v ok'>" + (r.claimed|0) + "</td>"
+      + "<td class='" + pendCls + "'>" + (r.completed|0) + "</td>"
+      + "<td class='muted'>" + (r.accepted|0) + "</td>"
+      + "<td class='muted'>" + (r.notAccepted|0) + "</td>"
+      + "<td>" + (r.level ?? "–") + "</td>"
+      + "<td>" + (r.energy ?? "–") + "</td>"
+      + "<td>" + expTxt + "</td>"
+      + "<td><button class='btn sm' data-run='" + a.idx + "'>跑这个</button> "
+        + "<button class='btn sm' data-det='" + a.idx + "'>明细</button></td>"
+      + "</tr>");
+
+    if (expanded[a.idx] && r.tasks) {
+      const t = r.tasks.map(x =>
+        "<tr><td></td><td colspan='11' style='padding-left:26px'>"
+        + "<span class='pill " + esc(statusCls(x.status)) + "'>" + esc(statusCn(x.status)) + "</span> "
+        + esc(x.name) + (x.current != null ? (" <span class='muted'>" + x.current + "/" + x.target + "</span>") : "")
+        + (x.is_new ? " <span class='pill accepted'>新</span>" : "")
+        + " <code>" + esc(x.code) + "</code></td></tr>").join("");
+      parts.push(t);
+    }
+  });
+
+  const el = $("accBody");
+  el.innerHTML = parts.join("");
+
+  el.querySelectorAll("button[data-run]").forEach(b => {
+    b.onclick = () => runOne(parseInt(b.getAttribute("data-run"), 10));
+  });
+  el.querySelectorAll("button[data-det]").forEach(b => {
+    b.onclick = () => {
+      const k = parseInt(b.getAttribute("data-det"), 10);
+      expanded[k] = !expanded[k];
+      renderAccounts(accounts, window.__rows || []);
+    };
+  });
+  window.__rows = rows;
+}
+
+async function runOne(idx) {
+  if (!live) { toast("当前是只读演练模式；要真跑请先打开「真实执行」", "err"); }
+  try {
+    await api("/api/run", {method: "POST",
+      body: JSON.stringify({only: idx, live: live, confirm: true})});
+    toast("已开始跑账号" + idx + (live ? "" : "（只读演练）"), "ok");
+    loadStatus();
+  } catch (e) { toast("启动失败：" + e.message, "err"); }
+}
+
+/* ---------------- 日志 ---------------- */
+function appendLog(item) {
+  if (item.seq <= lastSeq) return;
+  lastSeq = item.seq;
+  const box = $("log");
+  const d = document.createElement("span");
+  d.className = "l " + (item.level || "engine");
+  d.innerHTML = "<span class='t'>" + esc(item.ts) + "</span>" + esc(item.msg);
+  box.appendChild(d);
+  while (box.childNodes.length > 1500) box.removeChild(box.firstChild);
+  if (!logPaused && $("autoScroll").checked) box.scrollTop = box.scrollHeight;
+  $("logTag").textContent = box.childNodes.length + " 行";
+}
+
+function startLogStream() {
+  const es = new EventSource("/api/logs/stream?since=" + lastSeq);
+  es.onmessage = (ev) => {
+    try { appendLog(JSON.parse(ev.data)); } catch (e) {}
+  };
+  es.onerror = () => {
+    es.close();
+    setTimeout(startLogStream, 3000);   // 断线自动重连（带上 lastSeq，不重复）
+  };
+}
+
+/* ---------------- 交互 ---------------- */
+$("btnRefresh").onclick = () => { loadStatus(); loadAccounts(); loadWatch(); };
+
+$("watchEnabled").onchange = () => watchToggle($("watchEnabled").checked);
+$("btnWatchCheck").onclick = async () => {
+  $("btnWatchCheck").disabled = true;
+  try {
+    const d = (await api("/api/watch/check", {method: "POST"})).data || {};
+    toast(d.lastAction === "idle" ? "没有变化（当前账号没切）" : ("判定：" + d.lastAction), "ok");
+    loadWatch();
+  } catch (e) { toast("检查失败：" + e.message, "err"); }
+  finally { $("btnWatchCheck").disabled = false; }
+};
+$("btnWatchSave").onclick = async () => {
+  const body = {
+    poll_seconds: parseFloat($("watchPoll").value) || 5,
+    debounce_seconds: parseFloat($("watchDebounce").value) || 0,
+    min_gap_minutes: parseFloat($("watchGap").value) || 0,
+  };
+  try {
+    await api("/api/watch/config", {method: "POST", body: JSON.stringify(body)});
+    toast("守望者参数已保存", "ok");
+    loadWatch();
+  } catch (e) { toast("保存失败：" + e.message, "err"); }
+};
+
+$("btnAccRefresh").onclick = loadAccounts;
+$("btnDetailAll").onclick = () => {
+  const anyOff = accounts.some(a => !expanded[a.idx]);
+  accounts.forEach(a => { expanded[a.idx] = anyOff; });
+  renderAccounts(accounts, window.__rows || []);
+  $("btnDetailAll").textContent = anyOff ? "收起全部明细" : "展开全部明细";
+};
+
+$("btnLogPause").onclick = () => {
+  logPaused = !logPaused;
+  $("btnLogPause").textContent = logPaused ? "继续滚动" : "暂停滚动";
+};
+$("btnLogClear").onclick = () => { $("log").innerHTML = ""; $("logTag").textContent = "0 行"; };
+
+$("liveSwitch").onchange = async () => {
+  const v = $("liveSwitch").checked;
+  try {
+    await api("/api/schedule", {method: "POST", body: JSON.stringify({live: v})});
+    live = v;
+    toast("已切到" + (v ? "真实执行" : "只读演练"), "ok");
+    loadStatus();
+  } catch (e) { toast("切换失败：" + e.message, "err"); }
+};
+$("schedEnabled").onchange = async () => {
+  try {
+    await api("/api/schedule", {method: "POST",
+      body: JSON.stringify({enabled: $("schedEnabled").checked})});
+    toast("定时总开关已" + ($("schedEnabled").checked ? "打开" : "关闭"), "ok");
+    loadStatus();
+  } catch (e) { toast("保存失败：" + e.message, "err"); }
+};
+$("schedLive").onchange = async () => {
+  try {
+    await api("/api/schedule", {method: "POST",
+      body: JSON.stringify({live: $("schedLive").checked})});
+    toast("定时模式已改为" + ($("schedLive").checked ? "真实执行" : "只读演练"), "ok");
+    loadStatus();
+  } catch (e) { toast("保存失败：" + e.message, "err"); }
+};
+
+$("btnRun").onclick = () => {
+  $("confirmModal").classList.add("show");
+};
+$("cfmCancel").onclick = () => $("confirmModal").classList.remove("show");
+$("cfmOk").onclick = async () => {
+  $("confirmModal").classList.remove("show");
+  const only = $("confirmOnly").value;
+  try {
+    await api("/api/run", {method: "POST", body: JSON.stringify({
+      only: only ? parseInt(only, 10) : null, live: live, confirm: true})});
+    toast("已开始运行" + (live ? "" : "（只读演练）"), "ok");
+    loadStatus();
+  } catch (e) { toast("启动失败：" + e.message, "err"); }
+};
+
+/* ---------------- 启动 ---------------- */
+loadStatus();
+loadAccounts();
+loadWatch();
+startLogStream();
+setInterval(loadStatus, 5000);
+setInterval(loadWatch, 5000);
+</script>
+</body>
+</html>
