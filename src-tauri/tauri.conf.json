@@ -46,11 +46,11 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEYwNEU4RkQ5OEZCN0FGRApSV1Q5ZXZ1WS9lZ0VEd1VuVFpOYjU1OGJGd1NmMVhaWHJTSEdnNVRSSEcweUxWR05TN0h2WnloSwo=",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU2QUU0RkIxMEIwMjg5NkMKUldSc2lRSUxzVSt1NXRUa0I3bmNQVnhBeDdyNWk2ZVl6RVFDV0NJcG1waEVndnI1MzdDNUw1c24K",
       "endpoints": [
-        "https://github.com/changexbc/workbuddy-switch/releases/latest/download/latest.json",
-        "https://github.com/changexbc/workbuddy-switch/releases/latest/download/latest-{{target}}-{{arch}}.json",
-        "https://github.com/changexbc/workbuddy-switch/releases/latest/download/latest-macos-{{arch}}.json"
+        "https://github.com/2604237845/workbuddy-switch-pro/releases/latest/download/latest.json",
+        "https://github.com/2604237845/workbuddy-switch-pro/releases/latest/download/latest-{{target}}-{{arch}}.json",
+        "https://github.com/2604237845/workbuddy-switch-pro/releases/latest/download/latest-macos-{{arch}}.json"
       ]
     }
   }
