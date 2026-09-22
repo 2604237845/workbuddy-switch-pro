@@ -21,6 +21,28 @@
 > 每日签到（`t_sign`）与猫猫旅行（`t_travel`）被**显式排除**，因为上游已经在做。
 > 排除清单在 `engine/config/tasks.json` 的 `exclude_functions`，想改随时改。
 
+### 1.1 两条执行原则（避免白花额度 / 白留次数）
+
+**① 已完成的任务直接跳过，不再执行。**
+
+尤其是**会调用模型、消耗额度**的那几个：召唤专家团对话 · GLM-5.2 对话 · 夜猫子夜间对话 ·
+尝鲜热门技能 · 桌面端对话 · 小程序对话。
+
+判据不只看 `accept_status`，**也看 `progress`** —— 服务端对埋点是**延迟入账**的，
+「进度已满 `1/1` 但状态还停在 `accepted`」同样算完成；只认状态的话就会再发一次真实对话，
+那就是白白烧掉一份额度。此外每个账号开跑前会先**只读**拉一次任务列表，把
+「本轮跳过什么 / 要做什么 / 其中哪些会耗额度」打印出来，先给结论再动手。
+
+> 对应开关：`skip_done_tasks`、`preflight_report`（都在 `engine/config/tasks.json`）
+
+**② 抽奖与开盲盒不设上限，每次查余额，有多少用多少。**
+
+上游实现有两处不一致，本引擎已替换：① 盲盒有硬上限 `min(affordable, 5)` —— 额度 30 也只开 5 个；
+② 抽奖只读一次次数就开抽，中途到账的新次数会漏。现在都是「**每轮重查余额 → 到 0 才停**」，
+并在所有账号跑完、两轮兜底领奖之后再**扫一遍余额清零**（额度可能过期）。
+
+> 对应开关：`drain_rewards`、`drain_max_rounds`、`final_drain_sweep`
+
 ---
 
 ## 2. 前置条件
@@ -140,6 +162,11 @@ vendor/   上游原始脚本：任务清单、请求封装           ← 只管�
 | `desktop_scope` | `all`（默认，每个账号都建立桌面会话）/ `current`（只做当前登录账号） |
 | `write_gap` | 写请求间隔秒数，太低容易触发频控 |
 | `dry_run_default` | **默认 `true` = 只读**。改成 `false` 才会默认真实执行 |
+| `skip_done_tasks` | **已完成的任务直接跳过**（默认开）。含「进度满但状态没翻」也判完成 |
+| `preflight_report` | 每账号开跑前先只读预检一次，打印「跳过 / 待做 / 会耗额度」清单 |
+| `drain_rewards` | 抽奖 / 盲盒**不设上限**，每轮重查余额到 0 才停（默认开） |
+| `drain_max_rounds` | 上面那条的**防跑飞保险丝**（默认 500；连续 3 轮余额不降即停），不是使用上限 |
+| `final_drain_sweep` | 全部账号跑完、兜底领奖之后再扫一遍余额清空（额度可能过期） |
 | `auto_update` | 上游同步开关 + 安全护栏（体积、必需函数、域名白名单） |
 | `fix_*` / `skill_real_chat` / `final_claim_sweep` | 各项修复的独立开关，出问题时可以逐个关掉定位 |
 
@@ -167,7 +194,7 @@ vendor/   上游原始脚本：任务清单、请求封装           ← 只管�
 
 ```bash
 python tasks/engine/selftest.py           # 上游同步护栏（8 项）
-python tasks/engine/selftest_engine.py    # 引擎接线与安全约束（305 项）
+python tasks/engine/selftest_engine.py    # 引擎接线与安全约束（346 项）
 python tasks/service/selftest_hub.py      # 服务层（69 项）
 ```
 

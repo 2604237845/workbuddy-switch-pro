@@ -695,6 +695,129 @@ def claim_all_completed(mod, s, emit, exclude=()):
     return got
 
 
+# ---------------------------------------------------------------- 已完成即跳过
+
+# 「会真实调用模型」的任务 —— 执行体是 POST /console/chat/completions（或等价的真实对话），
+# **重跑一次就是白烧一份额度**。预检里单独把它们拎出来强调，执行守卫也优先保这一组。
+# ⚠️ 这份清单会随活动更新变化，拿不准时以 vendor 里 `webchat(` 的调用点为准。
+CHAT_TASK_CODES = (
+    "Expert_team_use_3",     # 召唤3次专家团（真实团队对话）
+    "Model_chat_GLM5.2",     # 使用 GLM-5.2 对话（t_chat_n）
+    "chat_5",                # 对话 5 次（t_chat_n）
+    "black_cat",             # 夜猫子（夜间 GLM-5.2 对话）
+    "skill_1",               # 尝鲜热门技能（真实对话搭车上报）
+    "RichMeow_Chat",         # 桌面端 RichMeow 对话
+    "Sequential_Tasks_1",    # 小程序对话（序列任务 1）
+    "Sequential_Tasks_2",    # 小程序对话（序列任务 2）
+    "school_season",         # 校园日小程序对话
+    "desktop_chat_1_time",   # 开学季桌面端对话
+)
+
+
+def task_done(mod, s, code):
+    """🔴 **统一判据**：这个任务算不算「已经完成」？→ (done, status, current, target)
+
+    为什么不能只看 `accept_status`（2026-09-22 用户要求「先查完成状态再判定做不做」）：
+        服务端对某些埋点是**延迟入账**的 —— `progress` 可能早就满了（比如 1/1），
+        `accept_status` 却还停在 `accepted`，要过几十秒才翻成 `completed`。
+        此时若按「状态 != completed」判定，就会**再执行一遍**；而对话类任务的执行体
+        是真实 POST /console/chat/completions，重跑一次就是白白烧一份模型额度。
+
+    所以判据是「状态已完成」**或**「progress 已满」，两者取或：
+        · `completed` / `claimed`           → 已完成
+        · `target` 有值且 `current >= target` → 已完成（哪怕状态还没翻）
+    其余一律算未完成。查不到这个 code（返回 None）也**算未完成** ——
+    「不知道」必须走「照原样执行」这条路，绝不能反过来把任务静默跳过。
+    """
+    st, cur, tgt = None, None, None
+    try:
+        st, cur, tgt = mod.prog(s, code)
+    except Exception:  # noqa: BLE001 —— 查询失败时按「未完成」处理，宁可多做不可漏做
+        pass
+    # 成长中心口径查不到，再试小程序口径（Sequential_Tasks_* / school_season 只在小程序口径下发）
+    if st is None and hasattr(mod, "_mp_prog"):
+        try:
+            st, cur, tgt = mod._mp_prog(s, code)
+        except Exception:  # noqa: BLE001
+            pass
+    if st in ("completed", "claimed"):
+        return True, st, cur, tgt
+    if tgt and cur is not None and cur >= tgt:
+        return True, st, cur, tgt
+    return False, st, cur, tgt
+
+
+def _fmt_prog(cur, tgt):
+    """把进度格式化成 `1/1`；缺值用 `-` 占位（别打印 None）。"""
+    return "%s/%s" % ("-" if cur is None else cur, "-" if tgt is None else tgt)
+
+
+def _task_label(mod, code):
+    """code → 中文名；映射不到就退回 code 本身。"""
+    try:
+        return mod.task_cn(code) or code
+    except Exception:  # noqa: BLE001
+        return code
+
+
+def skip_if_done(mod, s, code, emit, label=None):
+    """已完成 → 打印一行「⏭️ 跳过」并返回 True；未完成返回 False。"""
+    done, st, cur, tgt = task_done(mod, s, code)
+    if done:
+        emit("   ⏭️ 跳过「%s」：已完成（%s %s）—— 不再执行，避免重复消耗额度"
+             % (label or _task_label(mod, code), st or "?", _fmt_prog(cur, tgt)))
+    return done
+
+
+def preflight_done_report(mod, s, emit, chat_codes=CHAT_TASK_CODES):
+    """每个账号开跑前的**只读预检**：先给「跳过什么 / 做什么」的结论，再动手。
+
+    🔴 2026-09-22 用户要求「应该首先检查任务的完成状态再去判定做不做」。
+    本函数就是这条要求的执行入口 —— 拉到的是**一次**任务列表快照，
+    把已完成与待做分开打印，并单独标出「会调用模型」的那几个。
+
+    全程只 GET，不发任何写请求，没有副作用。查询失败只告警，不影响后续执行。
+    返回 {"done": [...], "todo": [...], "chat_todo": [...], "chat_skip": [...]}，
+    每项是 (code, status, current, target)；失败返回 None。
+    """
+    try:
+        r = s.get(mod.BASE + "/v2/activity/growth/tasks", timeout=25, verify=False).json()
+        tasks = (r.get("data") or {}).get("tasks") or []
+    except Exception as exc:  # noqa: BLE001
+        emit("   🔍 预检失败（已忽略，照常执行）：%s" % type(exc).__name__)
+        return None
+
+    done, todo = [], []
+    for t in tasks:
+        if not isinstance(t, dict) or not t.get("task_code"):
+            continue
+        code = t["task_code"]
+        st = t.get("accept_status", "")
+        pr = t.get("progress") or {}
+        cur, tgt = pr.get("current"), pr.get("target")
+        is_done = st in ("completed", "claimed") or (tgt and cur is not None and cur >= tgt)
+        (done if is_done else todo).append((code, st, cur, tgt))
+
+    chat_set = set(chat_codes or ())
+    chat_todo = [c for c, _st, _c, _t in todo if c in chat_set]
+    chat_skip = [c for c, _st, _c, _t in done if c in chat_set]
+
+    emit("   🔍 预检：共 %d 项 → 已完成 %d 项（本轮直接跳过） / 待做 %d 项"
+         % (len(done) + len(todo), len(done), len(todo)))
+    if done:
+        emit("      ⏭️ 跳过（已完成）：%s" % "、".join(_task_label(mod, c) for c, *_ in done))
+    if todo:
+        emit("      ▶ 本轮要做：%s" % "、".join(_task_label(mod, c) for c, *_ in todo))
+    if chat_set:
+        emit("      💬 其中「要调用模型、会耗额度」的：待做 %d 项%s；跳过 %d 项%s"
+             % (len(chat_todo),
+                ("（%s）" % "、".join(_task_label(mod, c) for c in chat_todo)) if chat_todo else "",
+                len(chat_skip),
+                ("（%s）" % "、".join(_task_label(mod, c) for c in chat_skip)) if chat_skip else ""))
+
+    return {"done": done, "todo": todo, "chat_todo": chat_todo, "chat_skip": chat_skip}
+
+
 def credit_skill_via_real_chat(mod, s, uid, nick, emit):
     """用「真实对话 + growthEvent 搭车」点亮「尝鲜热门技能」(skill_1)。
 
@@ -708,8 +831,14 @@ def credit_skill_via_real_chat(mod, s, uid, nick, emit):
     （t_team_3 / t_black_cat）走的也正是这条路。
     一句话：**埋点必须搭在真实请求上，光发 /v2/report 不算数。**
     """
-    st, cur, tgt = mod.prog(s, "skill_1")
-    if st in ("completed", "claimed"):
+    # 🔴 判据统一走 task_done（2026-09-22 用户报障修复）：
+    #    旧代码只认 `completed/claimed`，不看 progress —— 而本函数下面那段是
+    #    **真发一次 POST /console/chat/completions**。服务端延迟入账时 skill_1 常常
+    #    已经是 `1/1` 却仍是 `accepted`，旧判定就会再发一次真实对话，纯白烧一份额度。
+    done, st0, cur0, tgt0 = task_done(mod, s, "skill_1")
+    if done:
+        emit("   ⏭️ 跳过「尝鲜热门技能」：已完成 %s —— 不再发真实对话"
+             % _fmt_prog(cur0, tgt0))
         return False
 
     skill_name = getattr(mod, "SKILL_NAME", "algorithmic-trading")
@@ -785,6 +914,18 @@ def apply_desktop_safety(mod, mode, cfg=None):
         并发起来会把账号状态写坏。这里换成纯 API 上报，效果对齐上游的合法降级路径。
         """
         emit = log if callable(log) else print
+        # 🔴 上游 run_account 传进来的 need_* 只看 accept_status，**不看 progress**。
+        #    服务端延迟入账时「progress 已满 1/1、状态还是 accepted」会被判成"没完成"
+        #    → 又发一遍桌面对话事件；而 skill_1 那一步更贵 —— 下面还会走
+        #    credit_skill_via_real_chat **真发一次模型对话**，纯白烧额度。
+        #    这里用统一判据重算：progress 满了就不再执行，两个都完成则整个桌面阶段跳过。
+        if (cfg or {}).get("skip_done_tasks", True) and s is not None:
+            need_rich = not task_done(mod, s, "RichMeow_Chat")[0]
+            need_skill = not task_done(mod, s, "skill_1")[0]
+            if not need_rich and not need_skill:
+                emit("   🖥️ 桌面任务：RichMeow_Chat / skill_1 均已完成 → 整个桌面阶段跳过"
+                     "（不发上报、不发对话，避免重复消耗额度）")
+                return
         emit("   🖥️ 桌面任务：指纹上报（RichMeow=%s skill_1=%s，不碰桌面端进程）"
              % (need_rich, need_skill))
         try:
@@ -993,9 +1134,15 @@ def apply_black_cat_fix(mod, cfg):
 
     def fixed(s, uid, nick, log):
         emit = log if callable(log) else print
-        st, cur, tgt = mod.prog(s, "black_cat")
-        if st in ("completed", "claimed"):
+        # 判据统一走 task_done：`completed/claimed` **或 progress 已满** 都算完成。
+        # 上游原本只有前者 —— 延迟入账期间会再发一次真实夜间对话（本任务每晚真的
+        # 要 POST 一次 GLM-5.2），纯白烧额度，正是用户指的那类浪费。
+        done0, st0, cur0, tgt0 = task_done(mod, s, "black_cat")
+        if done0:
+            emit("   ⏭️ 跳过「夜猫子」：已完成 %s —— 不再发夜间对话"
+                 % _fmt_prog(cur0, tgt0))
             return
+        st, cur, tgt = st0, cur0, (tgt0 or 3)
         if not mod.within_night_window():
             # 显式用北京时间：GitHub Actions runner 是 UTC，localtime() 会误导排查
             emit("   夜猫子: 仅23:00-08:00计数（CST），当前北京时间%d点，跳过"
@@ -1603,6 +1750,325 @@ def apply_post_claim_recheck(mod, cfg):
     return ["run_account→领奖后复查盲盒/抽奖"]
 
 
+def apply_drain_rewards(mod, cfg):
+    """🔴 「抽奖 / 开盲盒不设上限，每次查余额，有多少用多少」（2026-09-22 用户要求）。
+
+    用户原话：「开盲盒和抽奖啥的，不设限制，每次都检查有没有剩下的次数没用，直接用掉」。
+
+    实测上游（vendor 第 910-960 行）两处不一致：
+      · `t_blindbox`（盲盒）—— 有**硬上限** `n = min(affordable, 5)`：
+        额度 30 也只开 5 个，**剩下 25 个原地留着**，白等到明天甚至过期。
+      · `t_lottery`（抽奖）—— 只读**一次** `chances` 就 `for i in range(chances)`：
+        中途到账的新次数（同一轮里刚领的奖励）会被漏掉。
+      开学季转盘 `school_lottery` 本来就是 `while bal > 0`（查到 0 为止）✅ 不动它。
+
+    本补丁把这两个换成「**每轮重新查余额 → 有就继续 → 到 0 才停**」的版本：
+      · **不设人工使用上限**；`drain_max_rounds`（默认 500）只是防跑飞的保险丝。
+      · 每轮抽/开之前都**重新查一次余额**，账实相符才继续。
+      · 接口报错即停；**连续 3 轮余额不下降**也停 —— 那说明接口根本没在扣数，
+        再抽就是空转刷接口，容易被风控盯上（这是循环保护，不是使用限制）。
+      · 返回**实际用掉的次数**，供收尾清空统计；上游调用方忽略返回值，无影响。
+      · `t_lottery` / `t_blindbox` 都是「先查余额、够了才动手」，重复调用天然幂等，
+        所以本补丁与收尾清空一起用是安全的，不会多花。
+    """
+    if not cfg.get("drain_rewards", True):
+        return []
+    applied = []
+    max_rounds = int(cfg.get("drain_max_rounds", 500) or 500)
+    max_rounds = max(1, max_rounds)
+
+    # ---- 抽奖：每轮重查次数，抽到 0 为止 ----
+    if hasattr(mod, "t_lottery"):
+        def _drain_lottery(s=None, uid=None, nick=None, log=None, *a, **k):
+            emit = log if callable(log) else print
+            total, won, prev, stalled, rounds = 0, [], None, 0, 0
+            while rounds < max_rounds:
+                rounds += 1
+                try:
+                    r = s.get(mod.BASE + "/v2/activity/growth/lottery/chances",
+                              timeout=20, verify=False).json()
+                except Exception as exc:  # noqa: BLE001
+                    emit("   🎰抽奖: 查次数失败 %s，停止" % type(exc).__name__)
+                    break
+                cd = r.get("data") or {}
+                chances = cd.get("balance", cd.get("chances", cd.get("remaining", 0))) or 0
+                if chances <= 0:
+                    if not total:
+                        emit("   🎰抽奖: 无次数")
+                    break
+                if prev is not None and chances >= prev:
+                    stalled += 1
+                    if stalled >= 3:
+                        emit("   🎰抽奖: 连续 3 轮次数未下降（接口未扣数），停止")
+                        break
+                else:
+                    stalled = 0
+                prev = chances
+                try:
+                    rr = s.post(mod.BASE + "/v2/activity/growth/lottery/draw",
+                                json={"client_token": "draw-" + str(uuid.uuid4())},
+                                timeout=20, verify=False).json()
+                except Exception as exc:  # noqa: BLE001
+                    emit("   🎰抽奖: 第 %d 次请求异常 %s，停止" % (total + 1, type(exc).__name__))
+                    break
+                if rr.get("code") != 0:
+                    emit("   🎰抽奖: 停止（%s）" % str(rr.get("msg", ""))[:40])
+                    break
+                d = rr.get("data") or {}
+                won.append(str(d.get("prize_name", d.get("name", "?"))))
+                total += 1
+                time.sleep(1.5)
+            if total:
+                emit("   🎰抽奖: 共抽 %d 次（余 %s）→ %s"
+                     % (total, 0 if not prev else max(0, prev - total), "、".join(won)))
+            return total
+
+        mod.t_lottery = _drain_lottery
+        applied.append("t_lottery→每轮重查（不设上限）")
+
+    # ---- 盲盒：去掉 min(affordable, 5) 的硬上限 ----
+    if hasattr(mod, "t_blindbox"):
+        def _drain_blindbox(s=None, uid=None, nick=None, log=None, *a, **k):
+            emit = log if callable(log) else print
+            total, got, prev, stalled, rounds = 0, [], None, 0, 0
+            while rounds < max_rounds:
+                rounds += 1
+                try:
+                    q = s.get(mod.BASE + "/v2/activity/growth/buddy/quota",
+                              timeout=20, verify=False).json()
+                except Exception as exc:  # noqa: BLE001
+                    emit("   📦盲盒: 查额度失败 %s，停止" % type(exc).__name__)
+                    break
+                qd = q.get("data") or {}
+                affordable = qd.get("affordable", 0) or 0
+                if affordable <= 0:
+                    if not total:
+                        emit("   📦盲盒: 能量不足 (%s/10)" % qd.get("balance", "?"))
+                    break
+                if prev is not None and affordable >= prev:
+                    stalled += 1
+                    if stalled >= 3:
+                        emit("   📦盲盒: 连续 3 轮额度未下降（接口未扣数），停止")
+                        break
+                else:
+                    stalled = 0
+                prev = affordable
+                try:
+                    rr = s.post(mod.BASE + "/v2/activity/growth/buddy/open",
+                                json={"count": 1}, timeout=20, verify=False).json()
+                except Exception as exc:  # noqa: BLE001
+                    emit("   📦盲盒: 第 %d 个请求异常 %s，停止" % (total + 1, type(exc).__name__))
+                    break
+                if rr.get("code") != 0:
+                    emit("   📦盲盒: 停止（%s）" % str(rr.get("msg", ""))[:40])
+                    break
+                results = (rr.get("data") or {}).get("results", [])
+                if results:
+                    it = results[0] or {}
+                    ins = it.get("instance", {}) or {}
+                    tpl = it.get("template", {}) or {}
+                    got.append("%s(%s)" % (ins.get("name", tpl.get("name", "?")),
+                                           ins.get("rarity", tpl.get("rarity", ""))))
+                total += 1
+                time.sleep(1.2)
+            if total:
+                emit("   📦盲盒: 共开 %d 个（不再卡 5 个上限）→ %s" % (total, "、".join(got)))
+            return total
+
+        mod.t_blindbox = _drain_blindbox
+        applied.append("t_blindbox→去掉 min(…,5) 硬上限")
+
+    return applied
+
+
+def final_drain_sweep(mod, cfg):
+    """全账号收尾：把「领奖之后才到账」的抽奖次数 / 盲盒额度**再一次用干净**。
+
+    🔴 为什么必须有：抽奖次数与开盒额度是**发奖时才给**的，而领奖散落在整轮流程里 ——
+      单账号流程内已经复查过一次，但**全账号兜底领奖**（`final_claim_sweep`）之后
+      还会再进账一批 → 不扫这一遍就会留到明天（额度可能过期作废）。
+      用户要求：「每次都检查有没有剩下的次数没用，直接用掉」。
+
+    只做「查余额 + 用掉」，**不动任何任务状态**；`t_lottery` / `t_blindbox` 都是
+    「先查余额、够了才动手」，重复调用天然幂等，不会多花。返回 (抽奖次数, 开盒个数)。
+    """
+    stats = {"lottery": 0, "blindbox": 0, "accounts": 0}
+    for idx, acc in enumerate(getattr(mod, "ACCOUNTS", None) or [], 1):
+        if not isinstance(acc, dict):
+            continue
+        tok = (acc.get("access_token") or "").strip()
+        if not tok:
+            continue
+        tag = "账号%d" % idx
+
+        def _log(m, _t=tag):
+            """每个账号一个新 logger —— 别用循环变量做默认值，否则会串号。"""
+            print("[%s][%s] %s" % (time.strftime("%H:%M:%S"), _t, m))
+
+        try:
+            s = mod.new_api(tok)
+        except Exception as exc:  # noqa: BLE001
+            _log("🧹 收尾清空：建会话失败 %s，跳过" % type(exc).__name__)
+            continue
+        uid = mod.uid_of(tok) if hasattr(mod, "uid_of") else ""
+        nick = mod.nickname_of(tok) if hasattr(mod, "nickname_of") else ""
+        for fn, key, what in (("t_lottery", "lottery", "抽奖"),
+                              ("t_blindbox", "blindbox", "盲盒")):
+            f = getattr(mod, fn, None)
+            if not callable(f):
+                continue
+            try:
+                n = f(s, uid, nick, _log)
+            except Exception as exc:  # noqa: BLE001
+                _log("🧹 收尾清空[%s] 异常（已忽略）：%s: %s"
+                     % (what, type(exc).__name__, str(exc)[:50]))
+                continue
+            stats[key] += n if isinstance(n, int) else 0
+        stats["accounts"] += 1
+        time.sleep(1)
+    return stats
+
+
+def _arg(args, i, kwargs=None, name=None):
+    """从位置参数或关键字参数里取一个值（两边都没有就返回 None）。"""
+    if len(args) > i:
+        return args[i]
+    if kwargs and name:
+        return kwargs.get(name)
+    return None
+
+
+def _find_session(args, kwargs):
+    """从调用参数里认出 requests 会话 —— 鸭子类型：同时有 get 与 post 的才是。"""
+    for cand in list(args) + list(kwargs.values()):
+        if hasattr(cand, "get") and hasattr(cand, "post"):
+            return cand
+    return None
+
+
+# 「任务函数 → 它负责的 task_code」。语义：该函数负责的 code **全部**已完成 → 整个函数
+# 跳过；只要还有一项没完成就原样调用（函数内部自己的循环会跳掉已完成的那几项，不会漏做）。
+# 取 code 的回调签名是 (args, kwargs) → [code, ...] —— 不同函数把 code 放在不同参数位。
+# ⚠️ 加/删条目都要同步改 selftest_engine.py 的「已完成跳过」测试组。
+DONE_GUARD_TABLE = (
+    ("t_team_3",            lambda a, k: ["Expert_team_use_3"]),
+    ("t_chat_n",            lambda a, k: [_arg(a, 4, k, "code")]),
+    ("t_expert_5",          lambda a, k: ["expert_5"]),
+    ("t_template_5",        lambda a, k: ["template_5"]),
+    ("t_canvas_automation", lambda a, k: ["create_canvas", "automation_1", "playbook_prompt"]),
+    ("t_buddy_apps",        lambda a, k: ["Buddy_App", "Buddy_App_QQ"]),
+    ("t_theme",             lambda a, k: ["Hp_Appearance"]),
+    ("t_library",           lambda a, k: ["Library_read"]),
+    ("t_first_buddy",       lambda a, k: ["first_buddy"]),
+    ("t_black_cat",         lambda a, k: ["black_cat"]),
+    ("t_lighthouse",        lambda a, k: ["Expert_lighthouse"]),
+    ("t_sequential_tasks",  lambda a, k: ["Sequential_Tasks_1", "Sequential_Tasks_2"]),
+    ("t_school_season",     lambda a, k: ["school_season"]),
+)
+
+
+def apply_done_skip(mod, cfg):
+    """🔴 「已完成的任务直接跳过」统一守卫（2026-09-22，用户要求）。
+
+    用户原话：
+        「有些对话任务需要使用模型消耗积分，如果已经完成的情况下又去执行一遍就是
+          浪费积分，所以需要直接跳过不执行！应该首先检查任务的完成状态再去判定做不做」
+
+    动手前的现状盘点（vendor 与 engine 逐条核过）：
+      · 上游的**对话类**任务（`t_team_3` / `t_chat_n` / `t_black_cat`）自带循环内 prog 检查，
+        条件本来就是「status 完成 or progress 满」→ 判定是对的，不必重写；
+      · 但**非对话类**里有一批只认 status（`t_canvas_automation` / `t_buddy_apps` /
+        `t_theme` / `t_library` / `t_first_buddy` / `t_lighthouse` …）→
+        progress 已满而状态未翻时会**重发一遍上报**（不耗额度，但都是白写）；
+      · 本引擎自己的补丁里有**两处真的在烧额度**：`credit_skill_via_real_chat`
+        与 `_safe_desktop_tasks` 的 need_* 判定都只看 status（本篇之外已单独修掉）。
+
+    本补丁做两件事：
+      ① 按 `DONE_GUARD_TABLE` 给每个任务函数加**执行前守卫**（判据是统一的 `task_done`，
+         `completed/claimed` 或 `progress 已满` 都算完成），全部已完成则整个函数跳过，
+        并打印一行「⏭️ 跳过…」说明原因；
+      ② 给 `run_account` 包一层**开跑前只读预检**（`preflight_done_report`）——
+        这就是用户要的「首先检查任务的完成状态，再去判定做不做」：先给结论再动手。
+
+    ⚠️ 刻意**不**放进守卫表的（放进去反而会挡住该做的事）：
+        · `t_accept_all` —— 它只 accept `not_accepted`，本身就是"跳过已完成"的实现；
+        · `t_lottery` / `t_blindbox` —— 次数/能量**不是**任务完成态，靠余额自判才正确；
+        · `t_redeem` —— 服务端用 409「已兑换」幂等；
+        · `t_makeup` —— 靠本地热力图判昨日漏签，与任务状态无关；
+        · `t_gift_compensation` —— billing 接口，根本不在任务列表里，查不到 code；
+        · `t_sign` / `t_travel` —— 已被 exclude_functions 换成空操作；
+        · `t_workstation` —— 已换成纯提示，无任何动作。
+    """
+    if not cfg.get("skip_done_tasks", True):
+        return []
+    if not hasattr(mod, "prog"):
+        return []
+
+    applied = []
+
+    # ---- ① 声明式守卫表 ----
+    def _make_guarded(orig, codes_fn, fn_name):
+        def _guarded(*a, **k):
+            s = _find_session(a, k)
+            if s is None:
+                return orig(*a, **k)          # 认不出会话就别拦，照常执行
+            try:
+                codes = [c for c in (codes_fn(a, k) or []) if c]
+            except Exception:  # noqa: BLE001
+                codes = []
+            if not codes:
+                return orig(*a, **k)
+            states, all_done = [], True
+            for c in codes:
+                done, _st, cur, tgt = task_done(mod, s, c)
+                states.append((c, done, cur, tgt))
+                if not done:
+                    all_done = False
+            if all_done:
+                for c, _d, cur, tgt in states:
+                    print("   ⏭️ 跳过「%s」：已完成 %s —— 不再执行，避免重复消耗"
+                          % (_task_label(mod, c), _fmt_prog(cur, tgt)))
+                return None
+            return orig(*a, **k)
+
+        _guarded.__name__ = fn_name          # 便于日志与自检辨认
+        _guarded.__doc__ = getattr(orig, "__doc__", None)
+        return _guarded
+
+    for fn_name, codes_fn in DONE_GUARD_TABLE:
+        orig = getattr(mod, fn_name, None)
+        if not callable(orig):
+            continue                          # 上游改过名 / 假模块没这个函数 → 静默跳过
+        setattr(mod, fn_name, _make_guarded(orig, codes_fn, fn_name))
+        applied.append("%s→已完成即跳过" % fn_name)
+
+    # ---- ② 每账号开跑前的只读预检 ----
+    if cfg.get("preflight_report", True) and callable(getattr(mod, "run_account", None)):
+        _orig_run = mod.run_account
+
+        def _run_with_preflight(idx, acc=None, do_desktop=False, *a, **k):
+            tok = ""
+            if isinstance(acc, dict):
+                tok = (acc.get("access_token") or "").strip()
+            if tok:
+                tag = "账号%d" % idx
+
+                def _emit(m):
+                    print("[%s][%s] %s" % (time.strftime("%H:%M:%S"), tag, m))
+
+                try:
+                    preflight_done_report(mod, mod.new_api(tok), _emit)
+                except Exception as exc:  # noqa: BLE001
+                    _emit("🔍 预检异常（已忽略，照常执行）：%s: %s"
+                          % (type(exc).__name__, str(exc)[:60]))
+            return _orig_run(idx, acc, do_desktop, *a, **k)
+
+        mod.run_account = _run_with_preflight
+        applied.append("run_account→开跑前只读预检")
+
+    return applied
+
+
 def run_accounts(mod, args, cfg, desktop_idx=None):
     """逐个账号执行，返回 (summaries, failures)。
 
@@ -1844,6 +2310,9 @@ def run(args, observer=None, dry_run_override=None, log_sink=None):
         extra = apply_post_claim_recheck(mod, cfg)
         if extra:
             print("🔁 已挂上领奖后复查：%s" % ", ".join(extra))
+        drain = apply_drain_rewards(mod, cfg)
+        if drain:
+            print("🎰 抽奖/盲盒不设上限（每轮重查余额，到 0 才停）：%s" % ", ".join(drain))
         web_fix = apply_web_report_fix(mod, cfg)
         if web_fix:
             print("🧩 已修正 web 类上报形状：%s" % ", ".join(web_fix))
@@ -1861,6 +2330,12 @@ def run(args, observer=None, dry_run_override=None, log_sink=None):
         school_fix = apply_school_activity_fix(mod, cfg) if school_on else []
         if school_fix:
             print("🏫 已修正开学季活动：%s" % ", ".join(school_fix))
+        # 🔴 必须放在**所有补丁之后**：守卫要包住的是前面替换过的「最终实现」
+        #    （t_library / t_black_cat / t_sequential_tasks / t_school_season /
+        #      t_desktop_tasks 都被前面的补丁换过），顺序错了守卫就白挂。
+        done_skip = apply_done_skip(mod, cfg)
+        if done_skip:
+            print("⏭️ 已完成即跳过：%s" % ", ".join(done_skip))
         print("   上游脚本版本 sha256=%s\n" % upstream_sha())
 
         summaries, failures = run_accounts(mod, args, cfg, desktop_idx)
@@ -1903,6 +2378,24 @@ def run(args, observer=None, dry_run_override=None, log_sink=None):
                     print("   ✅ 无「已完成未领」，转盘余额为 0")
             except Exception as exc:
                 print("   开学季兜底异常（已忽略）：%s: %s"
+                      % (type(exc).__name__, str(exc)[:60]))
+
+        # 🔴 收尾清空：抽奖次数 / 开盒额度是**发奖时才给**的，上面两轮兜底领奖之后
+        #    还会再进账一批 → 这里最后再查一次余额，**有多少用多少**（用户要求）。
+        #    放在所有领奖之后，顺序错了就等于白扫。
+        if not dry_run and cfg.get("final_drain_sweep", True):
+            print("\n" + "─" * 66)
+            print("🧹 ── 收尾清空（抽奖次数 / 盲盒额度：有多少用多少）──")
+            print("─" * 66)
+            try:
+                ds = final_drain_sweep(mod, cfg)
+                if ds["lottery"] or ds["blindbox"]:
+                    print("   合计抽奖 %d 次、开盒 %d 个（%d 个账号）"
+                          % (ds["lottery"], ds["blindbox"], ds["accounts"]))
+                else:
+                    print("   ✅ 抽奖次数与盲盒额度都已用完（无需再抽）")
+            except Exception as exc:
+                print("   收尾清空异常（已忽略）：%s: %s"
                       % (type(exc).__name__, str(exc)[:60]))
 
         print("\n" + "=" * 66)

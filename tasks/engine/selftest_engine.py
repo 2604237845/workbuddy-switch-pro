@@ -1323,9 +1323,17 @@ def test_service_watcher():
     """
     print("\n── 19. 服务版守望者（切账号自动补跑）──")
 
-    hub = Path(__file__).resolve().parent.parent / "service" / "server.py"
+    # 两种布局都要认：
+    #   · 本机开发布局  <root>/wb-task-hub/  + <root>/wb-hub/
+    #   · 开源仓库布局  <root>/tasks/engine/ + <root>/tasks/service/
+    # 之前只认前者 → 别人 clone 下来这一组会因为找不到文件而**整组静默跳过**，
+    # 自检变成"绿但没跑"，是最坏的一种失败。
+    _here = Path(__file__).resolve().parent
+    hub = next((p for p in (_here.parent / "wb-hub" / "server.py",
+                            _here.parent / "service" / "server.py") if p.exists()),
+               _here.parent / "wb-hub" / "server.py")
     if not hub.exists():
-        check("能找到 tasks/service/server.py", str(hub), "(存在)")
+        check("能找到 server.py（wb-hub/ 或 tasks/service/）", str(hub), "(存在)")
         return
     src = hub.read_text(encoding="utf-8")
 
@@ -1573,6 +1581,373 @@ def test_black_cat_bounded():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+# ------------------------------------------------------------------ 22. 已完成即跳过
+
+def test_done_skip():
+    """🔴「已完成的任务直接跳过」—— 2026-09-22 用户要求的回归护栏。
+
+    用户原话：有些对话任务要用模型消耗积分，已完成再跑一遍就是浪费；
+             应该**先检查任务的完成状态再去判定做不做**。
+
+    本组锁五件事：
+      ① `task_done` 的判据 = `completed/claimed` **或** `progress 已满`。
+         后者是关键：服务端延迟入账时 progress 满而状态还是 accepted，
+         旧判据会认为"没完成" → 再发一次**真实模型对话**（白烧额度）。
+      ② 查不到该 code / 查询抛异常 → 一律算「未完成」——宁可多做，绝不静默漏做。
+      ③ 守卫只在「该函数负责的 code **全部**已完成」时整体跳过；任一未完成就照常调用。
+      ④ 认不出 requests 会话时绝不错杀。
+      ⑤ 开跑前的预检**只发 GET**，一个写请求都不发。
+    """
+    print("\n── 22. 已完成即跳过 ──")
+    import contextlib
+    import io
+
+    class FakeSession:
+        """只记请求，不联网。"""
+
+        def __init__(self):
+            self.verbs = []
+
+        def get(self, *a, **k):
+            self.verbs.append("GET")
+            raise RuntimeError("self-test 不联网")
+
+        def post(self, *a, **k):
+            self.verbs.append("POST")
+            raise RuntimeError("self-test 不联网")
+
+    class FakeMod:
+        BASE = "https://base.invalid"
+
+        def __init__(self, states=None):
+            self.states = dict(states or {})
+            self.calls = []
+
+        def __getattr__(self, name):
+            """给任何 `t_*` 名字都现造一个可调用对象。
+
+            🔴 必须是**通用**的：守卫表有 13 条，假模块少摆一个函数，那一处守卫就会
+               `if not callable(...)` 静默不生效 —— 本项目踩过这个老坑（见 MEMORY）。
+            """
+            if name.startswith("t_"):
+                def _rec(*a, **k):
+                    self.calls.append(name)
+                return _rec
+            raise AttributeError(name)
+
+        def prog(self, s, code):
+            return self.states.get(code, (None, None, None))
+
+        def task_cn(self, code):
+            return code
+
+    s = FakeSession()
+
+    # ---- ① 判据 ----
+    m = FakeMod({"a": ("completed", 1, 1), "b": ("claimed", 1, 1),
+                 "c": ("accepted", 1, 1), "d": ("accepted", 0, 1),
+                 "e": (None, None, None), "f": ("in_progress", 0, 0)})
+    check("completed → 已完成", E.task_done(m, s, "a")[0], True)
+    check("claimed → 已完成", E.task_done(m, s, "b")[0], True)
+    check("🔴 accepted 但 progress 已满 1/1 → 已完成（延迟入账不许重跑）",
+          E.task_done(m, s, "c")[0], True)
+    check("accepted 0/1 → 未完成", E.task_done(m, s, "d")[0], False)
+    check("查不到该 code → 未完成（宁可多做，不可漏做）",
+          E.task_done(m, s, "e")[0], False)
+    check("target=0 不算已满（别把 0/0 当完成）", E.task_done(m, s, "f")[0], False)
+
+    # ---- ② 异常与兜底口径 ----
+    class BoomProg(FakeMod):
+        def prog(self, s, code):
+            raise RuntimeError("模拟接口 500")
+
+    check("查询抛异常 → 未完成（不静默跳过）", E.task_done(BoomProg(), s, "a")[0], False)
+
+    class MpMod(FakeMod):
+        """成长中心口径查不到时，回落到小程序口径。"""
+
+        def prog(self, s, code):
+            return self.states.get(code) or (None, None, None)
+
+        def _mp_prog(self, s, code):
+            return self.states.get(code, (None, None, None))
+
+    check("成长中心查不到 → 回落小程序口径（Sequential_Tasks_* 就在那边）",
+          E.task_done(MpMod({"Sequential_Tasks_1": ("completed", 1, 1)}), s,
+                      "Sequential_Tasks_1")[0], True)
+
+    # ---- ③ 守卫行为 ----
+    m2 = FakeMod({"Expert_team_use_3": ("completed", 1, 1),
+                  "Library_read": ("accepted", 1, 1),          # 延迟入账：状态没翻但进度满
+                  "create_canvas": ("completed", 1, 1),
+                  "automation_1": ("completed", 1, 1),
+                  "playbook_prompt": ("accepted", 0, 1)})      # 这项还没做 → 不能整函数跳过
+    def _silent(fn, *a):
+        """守卫命中时会 print 一行「⏭️ 跳过…」，这里吞掉，别让它淹了自检结果。
+
+        ⚠️ 重定向只包住「被调用」这一下，**不能**把 check() 也裹进去 ——
+           否则 ✅/❌ 会一起被吞进 StringIO，自检看着像没跑。
+        """
+        with contextlib.redirect_stdout(io.StringIO()):
+            return fn(*a)
+
+    applied = E.apply_done_skip(m2, {})
+    check("守卫表 13 条全部挂上（少一条就是静默不生效）",
+          len([x for x in applied if "已完成即跳过" in x]), len(E.DONE_GUARD_TABLE))
+    s2 = FakeSession()
+    _silent(m2.t_team_3, s2, "uid", "nick", quiet)
+    check("全部已完成 → 不执行 t_team_3", m2.calls, [])
+    _silent(m2.t_library, s2, "uid", "nick", quiet)
+    check("progress 已满也算完成 → 不执行 t_library", m2.calls, [])
+    _silent(m2.t_canvas_automation, s2, "uid", "nick", quiet)
+    check("三项里有一项没完成 → 照常执行（绝不漏做）",
+          m2.calls, ["t_canvas_automation"])
+
+    # ---- ④ 认不出会话 → 绝不错杀 ----
+    m3 = FakeMod({"Expert_team_use_3": ("completed", 1, 1)})
+    E.apply_done_skip(m3, {})
+    _silent(m3.t_team_3, "这不是会话", "uid", "nick", quiet)
+    check("认不出 requests 会话 → 照常执行", m3.calls, ["t_team_3"])
+
+    # ---- ⑤ t_chat_n 的 code 在第 5 个位置参数上 ----
+    m4 = FakeMod({"chat_5": ("completed", 5, 5)})
+    E.apply_done_skip(m4, {})
+    _silent(m4.t_chat_n, FakeSession(), "uid", "nick", quiet, "chat_5", 5, ["p"])
+    check("t_chat_n 取到 code 参数 → 已完成即跳过", m4.calls, [])
+    _silent(m4.t_chat_n, FakeSession(), "uid", "nick", quiet, "Model_chat_GLM5.2", 1, ["p"])
+    check("同函数另一个 code 未完成 → 照常执行", m4.calls, ["t_chat_n"])
+
+    # ---- ⑥ 开关 ----
+    m5 = FakeMod({"Expert_team_use_3": ("completed", 1, 1)})
+    check("skip_done_tasks=false → 一条守卫都不挂",
+          E.apply_done_skip(m5, {"skip_done_tasks": False}), [])
+
+    # ---- ⑦ 上游改名护栏：守卫名对不上就是静默失效 ----
+    src = (Path(__file__).resolve().parent / "vendor" / "workbuddy_daily.py").read_text(
+        encoding="utf-8")
+    upstream_defs = {n.name for n in ast.parse(src).body
+                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    missing = [fn for fn, _ in E.DONE_GUARD_TABLE if fn not in upstream_defs]
+    check("🔴 守卫表里的函数名在上游 vendor 里都存在（否则守卫静默失效）", missing, [])
+    check("task_done 依赖的上游 prog() 存在", "prog" in upstream_defs, True)
+    check("task_done 回落依赖的 _mp_prog() 存在", "_mp_prog" in upstream_defs, True)
+
+    # ---- ⑧ 预检：只读 + 先给结论 ----
+    class PreflightSession:
+        def __init__(self):
+            self.writes = 0
+
+        def get(self, *a, **k):
+            class _R:
+                status_code = 200
+
+                @staticmethod
+                def json():
+                    return {"data": {"tasks": [
+                        {"task_code": "Expert_team_use_3", "accept_status": "completed",
+                         "progress": {"current": 3, "target": 3}},
+                        {"task_code": "chat_5", "accept_status": "accepted",
+                         "progress": {"current": 0, "target": 5}},
+                    ]}}
+            return _R()
+
+        def post(self, *a, **k):
+            self.writes += 1
+            raise RuntimeError("预检绝不能发写请求")
+
+    class TasksMod(FakeMod):
+        def __init__(self):
+            FakeMod.__init__(self)
+            self.session = PreflightSession()
+            self.runs = 0
+
+        def run_account(self, idx, acc, do_desktop):
+            self.runs += 1
+            return [], {}
+
+        def new_api(self, tok):
+            return self.session
+
+    m6 = TasksMod()
+    E.apply_done_skip(m6, {})
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        m6.run_account(1, {"access_token": "tok"}, False)
+    out = buf.getvalue()
+    check("预检全程只读（0 个写请求）", m6.session.writes, 0)
+    check("预检之后仍照常执行原流程", m6.runs, 1)
+    check("预检打印「跳过（已完成）」结论", "跳过（已完成）" in out, True)
+    check("预检打印「本轮要做」", "本轮要做" in out, True)
+    check("💬 预检单独标出「要调用模型、会耗额度」的项", "会耗额度" in out, True)
+    check("💬 未完成的对话类任务被点名为待做", "chat_5" in out, True)
+
+    # 没有 token 的账号不该白拉一次接口
+    m7 = TasksMod()
+    E.apply_done_skip(m7, {})
+    m7.runs = 0
+    with contextlib.redirect_stdout(io.StringIO()):
+        m7.run_account(1, {"note": "无 token"}, False)
+    check("无 AT 的账号不预检（不白拉接口）", m7.runs, 1)
+
+
+# --------------------------------------------------- 23. 抽奖/盲盒不设上限
+
+def test_drain_rewards():
+    """🔴「抽奖 / 开盲盒不设上限，每次查余额，有多少用多少」—— 2026-09-22 用户要求。
+
+    实测上游两处不一致（vendor 910-960）：
+      · `t_blindbox` 有硬上限 `min(affordable, 5)` → 额度 30 也只开 5 个；
+      · `t_lottery` 只读一次次数就开抽 → 中途到账的新次数被漏掉。
+
+    本组锁：**每个任务都不再有人工上限**、**每轮重查余额**、
+            接口不扣数时能自己收手（防死循环）、余额为 0 时一次都不发。
+    """
+    print("\n── 23. 抽奖 / 盲盒：不设上限，用干净 ──")
+    import time as _real_time
+
+    class _FastTime:
+        """把 sleep 变空转（30 次开盒要跑 45 秒，不然自检太慢）。"""
+
+        def __getattr__(self, k):
+            return getattr(_real_time, k)
+
+        def sleep(self, *a, **k):
+            pass
+
+    class Resp:
+        def __init__(self, payload):
+            self._p = payload
+            self.status_code = 200
+
+        def json(self):
+            return self._p
+
+    class Sess:
+        """假会话：按 URL 后缀分发，余额状态挂在 FakeMod 上。"""
+
+        def __init__(self, m):
+            self.m = m
+
+        def get(self, url, *a, **k):
+            m = self.m
+            if "lottery/chances" in url:
+                return Resp({"code": 0, "data": {"balance": m.chances}})
+            if "buddy/quota" in url:
+                return Resp({"code": 0, "data": {"balance": m.energy,
+                                                 "affordable": m.quota}})
+            raise AssertionError("未预期的 GET %s" % url)
+
+        def post(self, url, *a, **k):
+            m = self.m
+            if "lottery/draw" in url:
+                m.draws += 1
+                if not m.stuck:
+                    m.chances = max(0, m.chances - 1)
+                if m.draws in m.grant_at_draw:      # 模拟"抽奖中途又到账了"
+                    m.chances += m.grant_at_draw[m.draws]
+                return Resp({"code": 0, "data": {"prize_name": "6积分"}})
+            if "buddy/open" in url:
+                m.opens += 1
+                if not m.stuck:
+                    m.quota = max(0, m.quota - 1)
+                return Resp({"code": 0, "data": {"results": [
+                    {"instance": {"name": "猫猫", "rarity": "R"}}]}})
+            raise AssertionError("未预期的 POST %s" % url)
+
+    class FakeMod:
+        BASE = "https://base.invalid"
+
+        def __init__(self, quota=0, chances=0, stuck=False, energy=999,
+                     grant_at_draw=None):
+            self.quota = quota
+            self.chances = chances
+            self.energy = energy
+            self.stuck = stuck                    # True → 接口不扣数（模拟异常）
+            self.grant_at_draw = grant_at_draw or {}
+            self.opens = 0
+            self.draws = 0
+            self.ACCOUNTS = []
+
+        def t_lottery(self, *a, **k):
+            raise AssertionError("t_lottery 应已被替换")
+
+        def t_blindbox(self, *a, **k):
+            raise AssertionError("t_blindbox 应已被替换")
+
+        def new_api(self, tok):
+            return Sess(self)
+
+        def uid_of(self, tok):
+            return "uid"
+
+        def nickname_of(self, tok):
+            return "nick"
+
+    orig_time = E.time
+    E.time = _FastTime()
+    try:
+        # ① 盲盒：30 个额度必须**全开**（上游会卡在 5 个）
+        m = FakeMod(quota=30)
+        labels = E.apply_drain_rewards(m, {})
+        check("两个函数都被替换",
+              sorted(labels), ["t_blindbox→去掉 min(…,5) 硬上限",
+                               "t_lottery→每轮重查（不设上限）"])
+        n = m.t_blindbox(Sess(m), "uid", "nick", quiet)
+        check("🔴 额度 30 → 开满 30 个（上游只开 5 个）", m.opens, 30)
+        check("返回真实用量 30", n, 30)
+
+        # ② 抽奖：中途到账的新次数也要用掉（上游只按首读开抽）
+        m2 = FakeMod(chances=2, grant_at_draw={2: 3})
+        E.apply_drain_rewards(m2, {})
+        n2 = m2.t_lottery(Sess(m2), "uid", "nick", quiet)
+        check("🔴 抽到 0 才停（中途补发的 3 次也被用掉）→ 共 5 次", m2.draws, 5)
+        check("返回真实用量 5", n2, 5)
+        check("余额被抽空", m2.chances, 0)
+
+        # ③ 余额为 0 → 一次都不发
+        m3 = FakeMod(quota=0, chances=0)
+        E.apply_drain_rewards(m3, {})
+        m3.t_blindbox(Sess(m3), "uid", "nick", quiet)
+        m3.t_lottery(Sess(m3), "uid", "nick", quiet)
+        check("余额为 0：一次都不发", [m3.opens, m3.draws], [0, 0])
+
+        # ④ 接口不扣数 → 连续 3 轮后自己收手（防死循环 / 防空转刷接口）
+        m4 = FakeMod(quota=10, stuck=True)
+        E.apply_drain_rewards(m4, {})
+        m4.t_blindbox(Sess(m4), "uid", "nick", quiet)
+        check("接口不扣数时收手（不为 0 就无限试）", m4.opens, 3)
+
+        # ⑤ 保险丝可配（不是使用上限，只是防跑飞）
+        m5 = FakeMod(quota=10, stuck=True)
+        E.apply_drain_rewards(m5, {"drain_max_rounds": 1})
+        m5.t_blindbox(Sess(m5), "uid", "nick", quiet)
+        check("drain_max_rounds=1 → 只试 1 轮", m5.opens, 1)
+
+        # ⑥ 开关可关
+        m6 = FakeMod()
+        check("drain_rewards=false → 不替换",
+              E.apply_drain_rewards(m6, {"drain_rewards": False}), [])
+
+        # ⑦ 收尾清空：把「领奖后才到账」的余额用掉并如实统计
+        m7 = FakeMod(quota=3, chances=2)
+        m7.ACCOUNTS = [{"access_token": "tok1", "note": "甲"}]
+        E.apply_drain_rewards(m7, {})
+        st = E.final_drain_sweep(m7, {})
+        check("收尾清空：抽奖 2 次", st["lottery"], 2)
+        check("收尾清空：开盒 3 个", st["blindbox"], 3)
+        check("收尾清空：覆盖 1 个账号", st["accounts"], 1)
+        check("收尾清空后余额清零", [m7.opens, m7.draws], [3, 2])
+
+        # ⑧ 无 AT 的账号不建会话，也不该炸
+        m8 = FakeMod(quota=1)
+        m8.ACCOUNTS = [{"note": "无 token"}]
+        E.apply_drain_rewards(m8, {})
+        st8 = E.final_drain_sweep(m8, {})
+        check("无 AT 的账号被跳过", [st8["accounts"], m8.opens], [0, 0])
+    finally:
+        E.time = orig_time
+
+
 def test_zh_status():
     """日志状态中文化 —— 用户 2026-09-20 要求「日志一律中文」。
 
@@ -1679,6 +2054,8 @@ def main():
     test_school_final_sweep()
     test_claim_after_light()
     test_black_cat_bounded()
+    test_done_skip()
+    test_drain_rewards()
     test_zh_status()
     print("\n" + "=" * 70)
     if FAILED:
